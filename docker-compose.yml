@@ -1,0 +1,25 @@
+name: raw-lakehouse
+
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: shop
+      MYSQL_USER: shop
+      MYSQL_PASSWORD: shop
+    command:
+      - --server-id=1
+      - --log-bin=mysql-bin
+      - --binlog-row-image=FULL
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./data/olist:/var/lib/mysql-files
+
+volumes:
+  mysql_data:

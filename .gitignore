@@ -1,0 +1,15 @@
+# Python virtual environment (rebuild with: pip install -r replayer/requirements.txt)
+.venv/
+__pycache__/
+*.pyc
+
+# Downloaded dataset: large, and licensed separately (see README)
+data/
+
+# Local secrets
+.env
+
+# Editor / OS files
+.vscode/
+Thumbs.db
+.DS_Store
