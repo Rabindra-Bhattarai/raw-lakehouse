@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python:
+    name: Lint and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: replayer/requirements.txt
+      - run: pip install -r replayer/requirements.txt pytest ruff
+      - name: Lint
+        run: ruff check replayer spark superset
+      - name: Unit tests
+        run: pytest replayer/tests -v
+
+  dbt:
+    name: dbt project compiles
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install dbt-core==1.12.6 dbt-trino==1.10.6
+      # parse checks every model, macro, ref() and test definition without needing a database
+      - run: dbt parse --project-dir dbt --profiles-dir dbt
+
+  compose:
+    name: Docker setup is valid
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compose file is valid (all profiles)
+        run: docker compose --profile analytics config --quiet
+      - name: Connector config is valid JSON
+        run: python -m json.tool connect/shop-mysql.json > /dev/null
+      - name: Replayer image builds
+        run: docker build -t replayer replayer

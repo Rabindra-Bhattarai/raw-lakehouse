@@ -1,0 +1,23 @@
+version: 2
+
+models:
+  - name: gold_order_facts
+    description: One row per order, joined with items, payments, newest review and customer state.
+    columns:
+      - name: order_id
+        data_tests: [unique, not_null]
+      - name: order_value
+        data_tests: [non_negative]
+
+  - name: gold_daily_sales
+    description: Orders and revenue per purchase day (event time). Cancellations are excluded from revenue.
+    columns:
+      - name: order_date
+        data_tests: [unique, not_null]
+
+  - name: gold_sales_by_state
+  - name: gold_category_sales
+  - name: gold_delivery_performance
+  - name: gold_order_status
+  - name: gold_late_arrivals
+  - name: gold_kpis

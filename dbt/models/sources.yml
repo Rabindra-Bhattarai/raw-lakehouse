@@ -1,0 +1,23 @@
+version: 2
+
+sources:
+  - name: bronze
+    database: iceberg
+    schema: bronze
+    description: Raw Debezium change events, written by the Spark streaming job.
+    tables:
+      - name: cdc_events
+        description: One row per MySQL change (insert, update, delete, snapshot read).
+        config:
+          loaded_at_field: ingested_at
+          freshness:
+            warn_after: {count: 5, period: minute}
+            error_after: {count: 30, period: minute}
+        columns:
+          - name: kafka_offset
+            data_tests: [not_null]
+          - name: op
+            data_tests:
+              - accepted_values:
+                  arguments:
+                    values: ["c", "u", "d", "r"]

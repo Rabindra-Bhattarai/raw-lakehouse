@@ -1,0 +1,24 @@
+name: lakehouse
+version: "1.0.0"
+config-version: 2
+profile: lakehouse
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+target-path: target
+clean-targets: [target, dbt_packages]
+
+flags:
+  require_certificate_validation: true
+
+# Silver and gold are views: every query reads the latest bronze data, so dashboards stay live
+# and late-arriving changes are picked up automatically, with no backfill job.
+models:
+  lakehouse:
+    silver:
+      +schema: silver
+      +materialized: view
+    gold:
+      +schema: gold
+      +materialized: view

@@ -1,0 +1,6 @@
+line-length = 120
+target-version = "py312"
+
+[lint]
+# pycodestyle errors/warnings, pyflakes, import order, common bug patterns
+select = ["E", "W", "F", "I", "B"]

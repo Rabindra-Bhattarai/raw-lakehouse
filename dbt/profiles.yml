@@ -1,0 +1,13 @@
+lakehouse:
+  target: dev
+  outputs:
+    dev:
+      type: trino
+      method: none
+      user: dbt
+      host: "{{ env_var('TRINO_HOST', 'trino') }}"
+      port: "{{ env_var('TRINO_PORT', '8080') | int }}"
+      http_scheme: http
+      database: iceberg
+      schema: silver
+      threads: 1  # one query at a time: Trino runs on a small laptop here

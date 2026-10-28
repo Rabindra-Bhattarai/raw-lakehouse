@@ -1,0 +1,78 @@
+version: 2
+
+models:
+  - name: silver_orders
+    description: Current state of each order (latest CDC change per order_id, deletes removed).
+    columns:
+      - name: order_id
+        data_tests: [unique, not_null]
+      - name: customer_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_customers')
+                field: customer_id
+      - name: order_status
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [created, approved, invoiced, processing, shipped, delivered, canceled, unavailable]
+      - name: purchased_at
+        data_tests: [not_null]
+
+  - name: silver_order_items
+    description: One row per product inside an order (grain = order_id + order_item_id).
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [order_id, order_item_id]
+    columns:
+      - name: order_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver_orders')
+                field: order_id
+      - name: price
+        data_tests: [not_null, non_negative]
+
+  - name: silver_order_payments
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [order_id, payment_sequential]
+    columns:
+      - name: payment_value
+        data_tests: [non_negative]
+
+  - name: silver_order_reviews
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [review_id, order_id]
+    columns:
+      - name: review_score
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4, 5]
+                quote: false
+
+  - name: silver_customers
+    columns:
+      - name: customer_id
+        data_tests: [unique, not_null]
+
+  - name: silver_products
+    columns:
+      - name: product_id
+        data_tests: [unique, not_null]
+
+  - name: silver_sellers
+    columns:
+      - name: seller_id
+        data_tests: [unique, not_null]

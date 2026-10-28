@@ -1,6 +1,13 @@
 name: raw-lakehouse
 
+# Two groups, because a laptop may not have RAM for everything at once:
+#   docker compose up -d                          → core: the real-time pipeline (steps 1–3)
+#   docker compose --profile analytics up -d      → also Trino + Superset (steps 4–6)
+
 services:
+
+  # ---------- Step 1: the source ----------
+
   mysql:
     image: mysql:8.4
     container_name: mysql
@@ -15,11 +22,270 @@ services:
       - --binlog-row-image=FULL
       - --gtid-mode=ON
       - --enforce-gtid-consistency=ON
+      - --innodb-buffer-pool-size=128M
     ports:
       - "3307:3306"
     volumes:
       - mysql_data:/var/lib/mysql
       - ./data/olist:/var/lib/mysql-files
+      - ./mysql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -prootpass --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  replayer:
+    build: ./replayer
+    container_name: replayer
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_USER: shop
+      MYSQL_PASSWORD: shop
+      MYSQL_DATABASE: shop
+      DATA_DIR: /data/olist
+      EVENTS_PER_SECOND: 20
+    volumes:
+      - ./data/olist:/data/olist:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: on-failure
+    mem_limit: 700m
+
+  # ---------- Step 2: capture changes ----------
+
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.7
+    container_name: redpanda
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --memory=400M
+      - --reserve-memory=0M
+      - --overprovisioned
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+    ports:
+      - "19092:19092"
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  console:
+    image: docker.redpanda.com/redpandadata/console:v2.7.2
+    container_name: console
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+      CONNECT_ENABLED: "true"
+      CONNECT_CLUSTERS_NAME: debezium
+      CONNECT_CLUSTERS_URL: http://connect:8083
+    ports:
+      - "8085:8080"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    mem_limit: 150m
+
+  connect:
+    # Debezium 3.x is needed for MySQL 8.4 (8.4 renamed SHOW MASTER STATUS to SHOW BINARY LOG STATUS)
+    image: quay.io/debezium/connect:3.0.8.Final
+    container_name: connect
+    environment:
+      BOOTSTRAP_SERVERS: redpanda:9092
+      GROUP_ID: connect-cluster
+      CONFIG_STORAGE_TOPIC: _connect_configs
+      OFFSET_STORAGE_TOPIC: _connect_offsets
+      STATUS_STORAGE_TOPIC: _connect_status
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+      HEAP_OPTS: -Xms128m -Xmx384m
+    ports:
+      - "8083:8083"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8083/connectors > /dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+
+  # Registers the Debezium connector. PUT .../config is idempotent: running it twice changes nothing.
+  connect-init:
+    image: curlimages/curl:8.10.1
+    container_name: connect-init
+    volumes:
+      - ./connect/shop-mysql.json:/shop-mysql.json:ro
+    command:
+      - -sf
+      - -X
+      - PUT
+      - -H
+      - "Content-Type: application/json"
+      - --data
+      - "@/shop-mysql.json"
+      - http://connect:8083/connectors/shop-mysql/config
+    depends_on:
+      connect:
+        condition: service_healthy
+
+  # ---------- Step 3: the lakehouse ----------
+
+  # S3-compatible object storage. (MinIO's own public images are gone; Bitnami's legacy build is real MinIO.)
+  minio:
+    image: bitnamilegacy/minio:2025.4.22
+    container_name: minio
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_DEFAULT_BUCKETS: lakehouse
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/bitnami/minio/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    mem_limit: 450m
+
+  # Iceberg REST catalog: the registry of tables (names, schemas, snapshots). Data files live in MinIO.
+  iceberg-rest:
+    image: tabulario/iceberg-rest:1.6.0
+    container_name: iceberg-rest
+    user: root
+    environment:
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      CATALOG_WAREHOUSE: s3://lakehouse/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://minio:9000
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+      CATALOG_URI: jdbc:sqlite:/catalog/iceberg_catalog.db
+      JAVA_TOOL_OPTIONS: -Xmx192m
+    ports:
+      - "8181:8181"
+    volumes:
+      - iceberg_catalog:/catalog
+    depends_on:
+      minio:
+        condition: service_healthy
+    mem_limit: 350m
+
+  spark:
+    image: apache/spark:3.5.3-scala2.12-java17-python3-ubuntu
+    container_name: spark
+    user: root
+    environment:
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+    command:
+      - /opt/spark/bin/spark-submit
+      - --master=local[2]
+      - --driver-memory=700m
+      - --packages=org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3,org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1,org.apache.iceberg:iceberg-aws-bundle:1.6.1
+      - --conf=spark.jars.ivy=/ivy
+      - --conf=spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
+      - --conf=spark.sql.catalog.lake=org.apache.iceberg.spark.SparkCatalog
+      - --conf=spark.sql.catalog.lake.type=rest
+      - --conf=spark.sql.catalog.lake.uri=http://iceberg-rest:8181
+      - --conf=spark.sql.catalog.lake.warehouse=s3://lakehouse/
+      - --conf=spark.sql.catalog.lake.io-impl=org.apache.iceberg.aws.s3.S3FileIO
+      - --conf=spark.sql.catalog.lake.s3.endpoint=http://minio:9000
+      - --conf=spark.sql.catalog.lake.s3.path-style-access=true
+      - --conf=spark.sql.shuffle.partitions=2
+      - /opt/app/stream_cdc.py
+    ports:
+      - "4040:4040"
+    volumes:
+      - ./spark:/opt/app:ro
+      - spark_checkpoints:/checkpoints
+      - spark_ivy:/ivy
+    depends_on:
+      iceberg-rest:
+        condition: service_started
+      redpanda:
+        condition: service_healthy
+    restart: on-failure
+    mem_limit: 1100m
+
+  # ---------- Step 4: query the lake ----------
+
+  trino:
+    image: trinodb/trino:470
+    container_name: trino
+    profiles: [analytics]
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./trino/catalog:/etc/trino/catalog:ro
+      - ./trino/jvm.config:/etc/trino/jvm.config:ro
+    depends_on:
+      iceberg-rest:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "/usr/lib/trino/bin/health-check"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+    restart: unless-stopped
+    mem_limit: 1400m
+
+  # ---------- Step 5: transform (run on demand: docker compose run --rm dbt build) ----------
+
+  dbt:
+    build: ./dbt
+    container_name: dbt
+    profiles: [analytics]
+    environment:
+      TRINO_HOST: trino
+      TRINO_PORT: 8080
+    volumes:
+      - ./dbt:/dbt
+    depends_on:
+      trino:
+        condition: service_healthy
+
+  # ---------- Step 6: dashboard ----------
+
+  superset:
+    build: ./superset
+    container_name: superset
+    profiles: [analytics]
+    environment:
+      SUPERSET_SECRET_KEY: local-demo-secret-change-me
+      ADMIN_USER: admin
+      ADMIN_PASSWORD: admin
+      SERVER_WORKER_AMOUNT: 1
+    ports:
+      - "8088:8088"
+    volumes:
+      - superset_home:/app/superset_home
+    depends_on:
+      trino:
+        condition: service_healthy
+    mem_limit: 900m
 
 volumes:
+  superset_home:
   mysql_data:
+  redpanda_data:
+  minio_data:
+  iceberg_catalog:
+  spark_checkpoints:
+  spark_ivy:
